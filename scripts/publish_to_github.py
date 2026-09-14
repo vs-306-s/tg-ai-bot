@@ -64,6 +64,9 @@ def collect_files() -> dict[str, bytes]:
         name = rel.name
         if name in SKIP_FILES or rel.suffix.lower() in SKIP_SUFFIX:
             continue
+        # временные файлы диагностики в корне проекта загружать не нужно
+        if rel.parent == Path(".") and rel.suffix.lower() in {".txt", ".log"} and name != "requirements.txt":
+            continue
         if name.startswith(".") and name not in {".gitignore", ".dockerignore"}:
             continue
         if rel.suffix.lower() not in TEXT_SUFFIX and name not in ALLOW_NAMES:
