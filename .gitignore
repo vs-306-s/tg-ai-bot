@@ -1,0 +1,15 @@
+# Секреты — никогда не попадают в репозиторий
+config.json
+.env
+gh_token.txt
+*.session
+
+# Данные бота
+data/
+
+# Мусор
+__pycache__/
+*.pyc
+*.log
+.venv/
+venv/
