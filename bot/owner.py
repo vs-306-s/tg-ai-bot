@@ -112,6 +112,7 @@ async def cmd_start(message: Message, bot: Bot) -> None:
             await message.answer("Этот бот уже привязан к другому аккаунту.")
             return
         cfg.set("owner_chat_id", message.chat.id)
+        db.set_setting("owner_chat_id", str(message.chat.id))
         await message.answer(
             "🔐 <b>Готово — ты владелец этого бота.</b>\n\n"
             f"Твой chat_id: <code>{message.chat.id}</code> (сохранён в config.json).\n\n" + HELP,

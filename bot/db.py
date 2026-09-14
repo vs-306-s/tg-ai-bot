@@ -86,6 +86,11 @@ CREATE TABLE IF NOT EXISTS connections (
     rights     TEXT,
     updated    TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 
@@ -338,6 +343,22 @@ def connection_owner(conn_id: str) -> int | None:
 
 
 # --------------------------------------------------------------- статистика
+def set_setting(key: str, value: str) -> None:
+    """Настройки, которые должны переживать пересборку контейнера на хостинге."""
+    with connect() as con:
+        con.execute(
+            "INSERT INTO settings (key, value) VALUES (?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, str(value)),
+        )
+
+
+def get_setting(key: str, default=None):
+    with connect() as con:
+        row = con.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
 def stats() -> dict:
     with connect() as con:
         total = con.execute("SELECT COUNT(*) AS n FROM messages").fetchone()["n"]

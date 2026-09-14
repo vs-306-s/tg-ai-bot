@@ -83,6 +83,13 @@ async def main() -> None:
 
     db.init()
 
+    # Владельца держим ещё и в базе: на хостинге config.json живёт только до пересборки,
+    # а data/ с базой подключён как постоянный диск (volume).
+    if not cfg.owner_chat_id:
+        saved_owner = db.get_setting("owner_chat_id")
+        if saved_owner:
+            cfg.set("owner_chat_id", saved_owner, save=False)
+
     session = AiohttpSession(proxy=cfg.proxy) if cfg.proxy else None
     bot = Bot(
         token=cfg.token,
