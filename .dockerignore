@@ -1,0 +1,13 @@
+config.json
+.env
+gh_token.txt
+data/
+__pycache__/
+*.pyc
+*.log
+.git/
+.venv/
+venv/
+scripts/publish_to_github.py
+README.md
+ХОСТИНГ.md

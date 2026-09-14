@@ -1,0 +1,33 @@
+{
+  "bot_token": "ЗАМЕНИТЕ_НА_ТОКЕН_ОТ_BOTFATHER",
+  "deepseek_api_key": "sk-ВАШ_КЛЮЧ_С_PLATFORM.DEEPSEEK.COM",
+  "deepseek_model": "deepseek-chat",
+  "deepseek_base_url": "https://api.deepseek.com",
+  "owner_chat_id": null,
+  "proxy": null,
+
+  "mode": "suggest",
+  "persona": "Отвечай дружелюбно и по-человечески, коротко, как в мессенджере. Близким — теплее, коллегам — по делу. Меня зовут Иван.",
+  "extra_instructions": "",
+  "disclose_ai": false,
+
+  "allowed_chats": [],
+  "blocked_chats": [],
+  "quiet_hours": null,
+  "notify_keywords": [],
+
+  "reply_delay_min": 2.0,
+  "reply_delay_max": 7.0,
+  "min_reply_interval": 3.0,
+  "max_replies_per_minute": 6,
+  "debounce_seconds": 1.6,
+  "max_reply_chars": 900,
+  "history_limit": 20,
+  "temperature": 0.8,
+  "max_tokens": 900,
+  "max_tool_rounds": 3,
+
+  "web_search": true,
+  "tools_enabled": true,
+  "memory_enabled": true
+}
