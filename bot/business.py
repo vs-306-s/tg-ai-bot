@@ -205,10 +205,14 @@ def _tool_set(cfg) -> set[str]:
     return enabled
 
 
-async def run_agent(cfg, messages: list[dict], ctx: ToolContext, rounds: int | None = None) -> str:
-    """Прогон модели с инструментами: она сама решает, когда искать в интернете."""
+async def run_agent(cfg, messages: list[dict], ctx: ToolContext, rounds: int | None = None,
+                    tools: set[str] | None = None) -> str:
+    """Прогон модели с инструментами: она сама решает, что вызвать.
+
+    tools можно задать явно — например, в чате владельца нужен доступ к базе переписок.
+    """
     ai = DeepSeek(cfg)
-    enabled = _tool_set(cfg)
+    enabled = set(tools) if tools else _tool_set(cfg)
     schema = tools_schema(enabled) if enabled != {"__none__"} else None
     ctx.enabled = enabled
     limit = int(rounds if rounds is not None else (cfg.get("max_tool_rounds") or 3))

@@ -137,6 +137,50 @@ SCHEMA: dict[str, dict] = {
             },
         },
     },
+    "list_chats": {
+        "type": "function",
+        "function": {
+            "name": "list_chats",
+            "description": "Показать переписки владельца, которые видит бот: название, id, число сообщений, "
+                           "режим и время последнего сообщения. Вызывай, когда спрашивают про чаты.",
+            "parameters": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "description": "Сколько чатов (1-40)"}},
+            },
+        },
+    },
+    "search_messages": {
+        "type": "function",
+        "function": {
+            "name": "search_messages",
+            "description": "Найти сообщения во всей переписке владельца по слову или фразе "
+                           "(«что писали про встречу», «где упоминали счёт»).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Что искать"},
+                    "limit": {"type": "integer", "description": "Сколько результатов (1-50)"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    "chat_digest": {
+        "type": "function",
+        "function": {
+            "name": "chat_digest",
+            "description": "Последние сообщения конкретного чата. Нужен chat_id — возьми его из "
+                           "list_chats или search_messages. Вызывай перед пересказом переписки.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "chat_id": {"type": "integer", "description": "id чата"},
+                    "count": {"type": "integer", "description": "Сколько сообщений (1-50)"},
+                },
+                "required": ["chat_id"],
+            },
+        },
+    },
     "set_reminder": {
         "type": "function",
         "function": {
@@ -149,6 +193,50 @@ SCHEMA: dict[str, dict] = {
                     "minutes": {"type": "integer", "description": "Через сколько минут (1-1440)"},
                 },
                 "required": ["text", "minutes"],
+            },
+        },
+    },
+    "list_chats": {
+        "type": "function",
+        "function": {
+            "name": "list_chats",
+            "description": "Показать переписки владельца, которые видит бот: название, id, число сообщений, "
+                           "режим и время последнего сообщения. Вызывай, когда спрашивают про чаты.",
+            "parameters": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "description": "Сколько чатов (1-40)"}},
+            },
+        },
+    },
+    "search_messages": {
+        "type": "function",
+        "function": {
+            "name": "search_messages",
+            "description": "Найти сообщения во всей переписке владельца по слову или фразе "
+                           "(«что писали про встречу», «где упоминали счёт»).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Что искать"},
+                    "limit": {"type": "integer", "description": "Сколько результатов (1-50)"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    "chat_digest": {
+        "type": "function",
+        "function": {
+            "name": "chat_digest",
+            "description": "Последние сообщения конкретного чата. Нужен chat_id — возьми его из "
+                           "list_chats или search_messages. Вызывай перед пересказом переписки.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "chat_id": {"type": "integer", "description": "id чата"},
+                    "count": {"type": "integer", "description": "Сколько сообщений (1-50)"},
+                },
+                "required": ["chat_id"],
             },
         },
     },
@@ -318,6 +406,47 @@ async def run_tool(name: str, args: dict, ctx: ToolContext) -> str:
                 return "Напоминания сейчас недоступны."
             _schedule_reminder(ctx, text, minutes)
             return f"Напомню через {minutes} мин: {text}"
+
+        if name == "list_chats":
+            limit = max(1, min(int(args.get("limit") or 20), 40))
+            rows = db.all_chats(limit)
+            if not rows:
+                return ("В базе пока нет ни одной переписки. Бот видит только сообщения, пришедшие "
+                        "ПОСЛЕ подключения к Telegram Business (Настройки → Telegram Business → "
+                        "Чат-боты); историю до подключения Telegram не отдаёт. Если подключение "
+                        "есть — нужно, чтобы кто-то написал владельцу первым сообщением.")
+            return "\n".join(
+                f"{r.get('title') or r['chat_id']} | id={r['chat_id']} | "
+                f"сообщений={r.get('msg_count')} | последнее={r.get('last_msg')} | "
+                f"режим={r.get('mode') or 'общий'}"
+                for r in rows
+            )
+
+        if name == "search_messages":
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return "Пустой запрос."
+            limit = max(1, min(int(args.get("limit") or 20), 50))
+            rows = db.search(query, limit)
+            if not rows:
+                return f"По запросу «{query}» в переписке ничего не найдено."
+            return "\n".join(
+                f"[{r['created']}] {r.get('chat_title') or r['chat_id']} | "
+                f"{'Я' if r.get('is_out') else (r.get('user_name') or 'собеседник')}: {r.get('text')}"
+                for r in rows
+            )
+
+        if name == "chat_digest":
+            chat_id = int(args.get("chat_id") or 0)
+            count = max(1, min(int(args.get("count") or 20), 50))
+            rows = db.recent(chat_id, count)
+            if not rows:
+                return f"В чате {chat_id} нет сохранённых сообщений."
+            return "\n".join(
+                f"[{r['created']}] {'Я' if r.get('is_out') else (r.get('user_name') or 'собеседник')}: "
+                f"{r.get('text') or '[' + (r.get('kind') or 'вложение') + ']'}"
+                for r in rows
+            )
 
     except Exception as e:  # noqa: BLE001 — инструмент не должен ронять ответ
         log.exception("ошибка инструмента %s", name)

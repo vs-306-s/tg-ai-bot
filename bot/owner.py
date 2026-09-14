@@ -28,6 +28,23 @@ CHUNK = 3500
 MODES = ("auto", "suggest", "off")
 MODE_LABEL = {"auto": "🤖 авто-ответы", "suggest": "💡 черновики мне", "off": "🔇 только читать"}
 
+# Какие инструменты доступны помощнику в личном чате с владельцем
+OWNER_TOOLS = {"list_chats", "search_messages", "chat_digest", "calc", "add_note", "list_notes"}
+OWNER_WEB_TOOLS = {"web_search", "open_page"}
+
+OWNER_SYSTEM = (
+    "Ты личный помощник владельца Telegram-аккаунта. Отвечай по-русски, по делу, коротко (до 10 строк).\n"
+    "Ты УМЕЕШЬ смотреть его переписку — инструментами: list_chats (список чатов), "
+    "search_messages (поиск по всем сообщениям), chat_digest (последние сообщения чата). "
+    "Когда спрашивают про чаты, людей или переписку — сначала вызови инструмент и посмотри данные, "
+    "и только потом отвечай. Никогда не говори «у меня нет доступа», не проверив инструментом.\n"
+    "Учитывай ограничение Telegram: бот видит только сообщения, пришедшие ПОСЛЕ подключения "
+    "к Telegram Business (Настройки → Telegram Business → Чат-боты); историю до подключения "
+    "Telegram не отдаёт. Если данных нет — объясни именно это.\n"
+    "Свежие факты из интернета — web_search, точная арифметика — calc, важные дела — add_note. "
+    "Никогда не выдумывай факты, цифры и цитаты из переписки."
+)
+
 HELP = """🤖 <b>Твой личный ИИ-помощник в Telegram</b>
 
 Я читаю твою переписку (подключён через Telegram Business) и могу отвечать от твоего лица.
@@ -456,21 +473,19 @@ async def cmd_ask(message: Message, command: CommandObject, bot: Bot) -> None:
 
 
 async def ask_agent(message: Message, bot: Bot, question: str) -> None:
-    """Спрашиваем ИИ (он сам решит, искать ли в интернете) и отвечаем владельцу."""
+    """Спрашиваем ИИ (он сам решит, что вызвать) и отвечаем владельцу."""
     if not config.cfg.has_ai:
         await message.answer("Сначала впиши ключ DeepSeek: /key sk-...")
         return
-    status = await message.answer("🤔 Ищу и думаю…")
-    system = (
-        "Ты личный помощник владельца. Отвечай по-русски, по делу, коротко (до 10 строк). "
-        "Если нужны свежие факты — вызывай инструменты (поиск в интернете, чтение страницы, калькулятор). "
-        "Не выдумывай, ссылайся на источники, если искал."
-    )
-    messages = [{"role": "system", "content": system},
+    status = await message.answer("🤔 Смотрю и думаю…")
+    messages = [{"role": "system", "content": OWNER_SYSTEM},
                 {"role": "user", "content": question}]
+    tools = set(OWNER_TOOLS)
+    if config.cfg.get("web_search"):
+        tools |= OWNER_WEB_TOOLS
     ctx = ToolContext(chat_id=0, bot=bot, owner_chat_id=config.cfg.owner_chat_id)
     try:
-        answer = await run_agent(config.cfg, messages, ctx)
+        answer = await run_agent(config.cfg, messages, ctx, tools=tools)
     except AIError as e:
         answer = f"❌ {e}"
     try:
