@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 import time
 from datetime import datetime
 
@@ -267,23 +268,63 @@ def _tool_set(cfg) -> set[str]:
     return enabled
 
 
+_TAG_OPEN = chr(60)      # символ «меньше»
+_TAG_CLOSE = chr(62)     # символ «больше»
+
+TOOL_MARKUP_RE = re.compile(
+    _TAG_OPEN + r"\s*/?\s*(tool_calls?|invoke|function_calls?|parameter|antml)", re.I)
+TAG_RE = re.compile(_TAG_OPEN + r"[^" + _TAG_CLOSE + r"]{0,120}" + _TAG_CLOSE)
+
+
+def looks_like_tool_markup(text: str) -> bool:
+    """Модель иногда «рисует» вызов инструмента текстом вместо настоящего вызова."""
+    return bool(text) and bool(TOOL_MARKUP_RE.search(text))
+
+
+def clean_answer(text: str) -> str:
+    """Убираем служебную разметку из ответа — такое не должно уходить людям."""
+    text = (text or "").strip()
+    if not looks_like_tool_markup(text):
+        return text
+    log.warning("в ответе была служебная разметка, вырезаю: %s", text[:120])
+    return re.sub(r"\s{2,}", " ", TAG_RE.sub(" ", text)).strip()
+
+
 async def run_agent(cfg, messages: list[dict], ctx: ToolContext, rounds: int | None = None,
                     tools: set[str] | None = None) -> str:
     """Прогон модели с инструментами: она сама решает, что вызвать.
 
-    tools можно задать явно — например, в чате владельца нужен доступ к базе переписок.
+    tools можно задать явно — например, в чате владельца нужен доступ к переписке
+    и возможность менять настройки бота.
     """
     ai = DeepSeek(cfg)
     enabled = set(tools) if tools else _tool_set(cfg)
     schema = tools_schema(enabled) if enabled != {"__none__"} else None
+    if schema and not ai.supports_tools:
+        # reasoning-модель не умеет инструменты — для действий берём обычную,
+        # иначе бот теряет все способности и просто «рисует» вызовы текстом
+        log.info("модель %s без инструментов — для этого запроса беру deepseek-chat", ai.model)
+        ai = DeepSeek(cfg, model_override="deepseek-chat")
     ctx.enabled = enabled
     limit = int(rounds if rounds is not None else (cfg.get("max_tool_rounds") or 3))
+    nudged = False
 
     for _ in range(limit + 1):
         message = await ai.chat(messages, tools=schema)
         calls = message.get("tool_calls") or []
         if not calls:
-            return (message.get("content") or "").strip()
+            text = (message.get("content") or "").strip()
+            if looks_like_tool_markup(text) and not nudged:
+                nudged = True
+                log.info("модель ответила разметкой вызова — прошу повторить нормально")
+                messages.append({"role": "assistant", "content": text})
+                messages.append({
+                    "role": "user",
+                    "content": "Не пиши служебную разметку в ответе. Либо вызови инструмент "
+                               "по-настоящему, либо ответь обычным текстом.",
+                })
+                continue
+            return clean_answer(text)
 
         messages.append({
             "role": "assistant",
@@ -301,7 +342,7 @@ async def run_agent(cfg, messages: list[dict], ctx: ToolContext, rounds: int | N
             })
 
     final = await ai.chat(messages, tools=None)
-    return (final.get("content") or "").strip()
+    return clean_answer((final.get("content") or "").strip())
 
 
 async def make_reply(cfg, bot: Bot, *, chat_id: int, conn_id: str | None,

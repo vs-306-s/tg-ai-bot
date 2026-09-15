@@ -28,8 +28,9 @@ class AIError(RuntimeError):
 
 
 class DeepSeek:
-    def __init__(self, cfg) -> None:
+    def __init__(self, cfg, model_override: str | None = None) -> None:
         self._cfg = cfg
+        self._model_override = model_override
 
     # ------------------------------------------------------------------ данные
     @property
@@ -38,7 +39,7 @@ class DeepSeek:
 
     @property
     def model(self) -> str:
-        return str(self._cfg.get("deepseek_model") or "deepseek-chat")
+        return self._model_override or str(self._cfg.get("deepseek_model") or "deepseek-chat")
 
     @property
     def url(self) -> str:

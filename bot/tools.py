@@ -47,7 +47,7 @@ class ToolContext:
 
 # Инструменты, меняющие настройки самого бота, — только для владельца
 ADMIN_ONLY = {
-    "set_mode", "set_style", "set_quiet_hours", "chat_action",
+    "set_mode", "set_style", "set_quiet_hours", "set_model", "chat_action", "write_to_chat",
     "remember", "forget", "learn_style", "show_settings",
 }
 
@@ -308,20 +308,60 @@ SCHEMA: dict[str, dict] = {
         "type": "function",
         "function": {
             "name": "chat_action",
-            "description": "Управление конкретным чатом: pause (пауза), resume (снять паузу), "
+            "description": "Управление конкретным чатом и памяти о человеке: pause (пауза), resume (снять паузу), "
                            "block (игнорировать), unblock, only (отвечать только в нём), "
-                           "reset_only (снять ограничение), note (заметка о чате).",
+                           "reset_only (снять ограничение), note (заметка о чате), "
+                           "facts (что известно о собеседнике), add_fact (запомнить о нём), clear_facts (забыть о нём).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "chat_id": {"type": "integer"},
                     "action": {"type": "string",
                                "enum": ["pause", "resume", "block", "unblock", "only",
-                                        "reset_only", "note"]},
+                                        "reset_only", "note", "facts", "add_fact", "clear_facts"]},
                     "minutes": {"type": "integer", "description": "для pause"},
-                    "text": {"type": "string", "description": "для note"},
+                    "text": {"type": "string", "description": "для note и add_fact"},
                 },
                 "required": ["chat_id", "action"],
+            },
+        },
+    },
+    "write_to_chat": {
+        "type": "function",
+        "function": {
+            "name": "write_to_chat",
+            "description": "Отправить сообщение в конкретный чат ОТ ЛИЦА ВЛАДЕЛЬЦА. Используй, когда он просит "
+                           "«напиши Олегу, что…». Текст пиши его манерой (посмотри chat_digest и примеры).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "chat_id": {"type": "integer", "description": "id чата из list_chats"},
+                    "text": {"type": "string", "description": "Текст сообщения"},
+                },
+                "required": ["chat_id", "text"],
+            },
+        },
+    },
+    "set_model": {
+        "type": "function",
+        "function": {
+            "name": "set_model",
+            "description": "Сменить модель DeepSeek: deepseek-chat (с поиском) или deepseek-reasoner (умнее, без поиска).",
+            "parameters": {
+                "type": "object",
+                "properties": {"model": {"type": "string", "enum": ["deepseek-chat", "deepseek-reasoner"]}},
+                "required": ["model"],
+            },
+        },
+    },
+    "close_note": {
+        "type": "function",
+        "function": {
+            "name": "close_note",
+            "description": "Отметить заметку выполненной (или закрыть все, если id не указан).",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "integer"}},
             },
         },
     },
@@ -697,7 +737,56 @@ async def run_tool(name: str, args: dict, ctx: ToolContext) -> str:
                 note = str(args.get("text") or "").strip()
                 db.set_chat(chat_id, note=note or None)
                 return f"Заметка о чате {chat_id}: {note or '—'}"
-            return "Действие может быть: pause, resume, block, unblock, only, reset_only, note."
+            if action == "facts":
+                known = db.facts(chat_id)
+                return (f"О собеседнике известно:\n" + "\n".join(f"— {f}" for f in known)
+                        if known else "Пока о нём ничего не записано.")
+            if action == "add_fact":
+                fact = str(args.get("text") or "").strip()
+                if not fact:
+                    return "Нечего запоминать."
+                db.add_fact(chat_id, fact)
+                return f"Запомнил о собеседнике: {fact}"
+            if action == "clear_facts":
+                return f"Убрал {db.clear_facts(chat_id)} записей о собеседнике."
+            return ("Действие может быть: pause, resume, block, unblock, only, reset_only, "
+                    "note, facts, add_fact, clear_facts.")
+
+        if name == "write_to_chat":
+            chat_id = int(args.get("chat_id") or 0)
+            text = str(args.get("text") or "").strip()
+            if not chat_id or not text:
+                return "Нужен chat_id и текст сообщения."
+            conn_id = db.last_conn_id(chat_id)
+            if not conn_id:
+                return ("Не знаю, через какую связку писать в этот чат. Пусть собеседник напишет "
+                        "первым — тогда я смогу и отвечать, и писать сам.")
+            if not ctx.bot:
+                return "Отправка сейчас недоступна."
+            from bot.business import send_as_owner
+
+            if await send_as_owner(ctx.bot, chat_id, conn_id, text, by_bot=False):
+                db.log_message(chat_id, text, is_out=True, kind="text",
+                               conn_id=conn_id, by_bot=False)
+                return f"Отправил в чат {chat_id}: {text}"
+            return "Отправить не получилось."
+
+        if name == "set_model":
+            model = str(args.get("model") or "").strip()
+            if model not in ("deepseek-chat", "deepseek-reasoner"):
+                return "Модель может быть deepseek-chat или deepseek-reasoner."
+            config.cfg.set("deepseek_model", model)
+            return f"Модель: {model}"
+
+        if name == "close_note":
+            raw = args.get("id")
+            if raw:
+                return "Готово." if db.close_note(int(raw)) else "Такой заметки нет."
+            closed = 0
+            for item in db.notes():
+                if db.close_note(int(item["id"])):
+                    closed += 1
+            return f"Закрыл заметки: {closed}."
 
         if name == "remember":
             text = str(args.get("text") or "").strip()
@@ -730,6 +819,7 @@ async def run_tool(name: str, args: dict, ctx: ToolContext) -> str:
 
         if name == "show_settings":
             cfg = config.cfg
+            stat = db.stats()
             return (
                 f"Режим: {cfg.get('mode')}\n"
                 f"Модель: {cfg.get('deepseek_model')}\n"
@@ -740,6 +830,7 @@ async def run_tool(name: str, args: dict, ctx: ToolContext) -> str:
                 f"Отвечаю только в: {', '.join(map(str, cfg.get('allowed_chats') or [])) or 'во всех чатах'}\n"
                 f"Подключений к аккаунту: {len([c for c in db.connections() if c.get('is_enabled')])}\n"
                 f"Переписок в базе: {db.stats()['chats']}\n"
+                f"Сообщений: {stat['total']} (сегодня {stat['today']})\n"
                 f"Пар «вопрос-ответ» для обучения: {db.pair_count()}\n"
                 f"Профиль стиля: {'есть' if db.get_setting('style_profile') else 'нет'}"
             )
