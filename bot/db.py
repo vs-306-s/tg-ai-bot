@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS messages (
     kind       TEXT DEFAULT 'text',
     tg_id      INTEGER,
     conn_id    TEXT,
+    by_bot     INTEGER DEFAULT 0,   -- 1 = сообщение написал сам бот, 0 = человек
     created    TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, id);
@@ -91,6 +92,22 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- Общая память владельца: предпочтения, правила, важные факты о людях
+CREATE TABLE IF NOT EXISTS memory (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    text    TEXT NOT NULL,
+    created TEXT DEFAULT (datetime('now'))
+);
+
+-- Обучение на ответах владельца: пара «сообщение собеседника → ответ владельца»
+CREATE TABLE IF NOT EXISTS style_pairs (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id  INTEGER,
+    incoming TEXT,
+    outgoing TEXT,
+    created  TEXT DEFAULT (datetime('now'))
+);
 """
 
 
@@ -102,6 +119,8 @@ def init() -> None:
         cols = {row["name"] for row in con.execute("PRAGMA table_info(messages)")}
         if "conn_id" not in cols:
             con.execute("ALTER TABLE messages ADD COLUMN conn_id TEXT")
+        if "by_bot" not in cols:
+            con.execute("ALTER TABLE messages ADD COLUMN by_bot INTEGER DEFAULT 0")
 
 
 @contextmanager
@@ -137,14 +156,16 @@ def log_message(
     kind: str = "text",
     tg_id: int | None = None,
     conn_id: str | None = None,
+    by_bot: bool = False,
 ) -> None:
     with connect() as con:
         con.execute(
             """INSERT INTO messages
-               (chat_id, chat_title, user_id, user_name, username, text, is_out, kind, tg_id, conn_id, created)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+               (chat_id, chat_title, user_id, user_name, username, text, is_out, kind, tg_id, conn_id,
+                by_bot, created)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (chat_id, chat_title, user_id, user_name, username, text,
-             int(bool(is_out)), kind, tg_id, conn_id, now_str()),
+             int(bool(is_out)), kind, tg_id, conn_id, int(bool(by_bot)), now_str()),
         )
 
 
@@ -340,6 +361,98 @@ def connection_owner(conn_id: str) -> int | None:
     with connect() as con:
         row = con.execute("SELECT user_id FROM connections WHERE conn_id=?", (conn_id,)).fetchone()
     return row["user_id"] if row else None
+
+
+# --------------------------------------------------- память владельца (общая)
+def remember(text: str) -> int:
+    """Запомнить что-то навсегда: предпочтение, правило, факт о человеке."""
+    with connect() as con:
+        cur = con.execute("INSERT INTO memory (text) VALUES (?)", (text.strip(),))
+    return cur.lastrowid
+
+
+def memory_items(limit: int = 50) -> list[dict]:
+    with connect() as con:
+        rows = con.execute(
+            "SELECT * FROM memory ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(r) for r in reversed(rows)]
+
+
+def memory_texts(limit: int = 30) -> list[str]:
+    with connect() as con:
+        rows = con.execute(
+            "SELECT text FROM memory ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [r["text"] for r in reversed(rows)]
+
+
+def forget_memory(memory_id: int | None = None) -> int:
+    """Удаляет одну запись памяти или всю память (memory_id=None)."""
+    with connect() as con:
+        if memory_id is None:
+            cur = con.execute("DELETE FROM memory")
+        else:
+            cur = con.execute("DELETE FROM memory WHERE id=?", (memory_id,))
+    return cur.rowcount
+
+
+# --------------------------------------------------- обучение стилю владельца
+def add_style_pair(chat_id: int, incoming: str | None, outgoing: str) -> None:
+    with connect() as con:
+        con.execute(
+            "INSERT INTO style_pairs (chat_id, incoming, outgoing) VALUES (?,?,?)",
+            (chat_id, (incoming or "")[:500], outgoing[:1000]),
+        )
+
+
+def style_pairs(chat_id: int | None = None, limit: int = 5) -> list[dict]:
+    """Примеры «что писали мне → как я ответил» — сначала из этого же чата."""
+    with connect() as con:
+        if chat_id:
+            rows = con.execute(
+                "SELECT incoming, outgoing FROM style_pairs WHERE chat_id=? ORDER BY id DESC LIMIT ?",
+                (chat_id, limit),
+            ).fetchall()
+            if rows:
+                return [dict(r) for r in reversed(rows)]
+        rows = con.execute(
+            "SELECT incoming, outgoing FROM style_pairs ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(r) for r in reversed(rows)]
+
+
+def last_incoming(chat_id: int) -> str | None:
+    with connect() as con:
+        row = con.execute(
+            """SELECT text FROM messages WHERE chat_id=? AND is_out=0 AND text IS NOT NULL
+               ORDER BY id DESC LIMIT 1""",
+            (chat_id,),
+        ).fetchone()
+    return row["text"] if row else None
+
+
+def owner_replies(limit: int = 60, chat_id: int | None = None) -> list[str]:
+    """Как владелец пишет сам — на этом учимся его манере.
+
+    Сообщения самого бота (by_bot=1) не берём: иначе он учился бы на своём же тексте.
+    """
+    sql = ("SELECT text FROM messages WHERE is_out=1 AND by_bot=0 "
+           "AND text IS NOT NULL AND text != ''")
+    args: list = []
+    if chat_id:
+        sql += " AND chat_id=?"
+        args.append(chat_id)
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(limit)
+    with connect() as con:
+        rows = con.execute(sql, args).fetchall()
+    return [r["text"] for r in reversed(rows)]
+
+
+def pair_count() -> int:
+    with connect() as con:
+        return con.execute("SELECT COUNT(*) AS n FROM style_pairs").fetchone()["n"]
 
 
 # --------------------------------------------------------------- статистика

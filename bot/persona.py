@@ -38,7 +38,7 @@ AI_POLICY_PRIVATE = ("Если собеседник прямо спрашива�
 
 
 def build_system(cfg, *, chat_id: int, chat_title: str | None = None,
-                 contact_name: str | None = None, extra: str = "") -> str:
+                 contact_name: str | None = None, extra: str = "", examples: str = "") -> str:
     ai_policy = AI_POLICY_OPEN if cfg.get("disclose_ai") else AI_POLICY_PRIVATE
     persona = (cfg.get("persona") or "пиши нейтрально и по-дружески").strip()
 
@@ -61,9 +61,22 @@ def build_system(cfg, *, chat_id: int, chat_title: str | None = None,
         if known:
             text += "\n\nЧто ты уже знаешь о собеседнике:\n" + "\n".join(f"— {f}" for f in known)
 
+    # Память владельца: его просьбы и правила — соблюдаем всегда
+    owner_memory = db.memory_texts(30)
+    if owner_memory:
+        text += "\n\nВладелец просил помнить и соблюдать:\n" + "\n".join(f"— {m}" for m in owner_memory)
+
+    # Профиль стиля: ему бот научился на сообщениях владельца
+    profile = str(db.get_setting("style_profile") or "").strip()
+    if profile:
+        text += "\n\nКак пишет сам владелец (подражай этой манере):\n" + profile
+
     instructions = (cfg.get("extra_instructions") or "").strip()
     if instructions:
         text += f"\n\nДополнительные указания владельца:\n{instructions}"
+
+    if examples:
+        text += "\n\n" + examples
 
     if extra:
         text += f"\n\n{extra}"
@@ -71,16 +84,29 @@ def build_system(cfg, *, chat_id: int, chat_title: str | None = None,
     return text
 
 
+def style_examples(chat_id: int, limit: int = 3) -> str:
+    """Живые примеры: что писали владельцу и как он отвечал сам (обучение на его ответах)."""
+    pairs = [p for p in db.style_pairs(chat_id, limit) if p.get("incoming") and p.get("outgoing")]
+    if not pairs:
+        return ""
+    lines = ["Как владелец уже отвечал в похожих случаях (образец манеры и длины):"]
+    for pair in pairs:
+        lines.append(f"Собеседник: {pair['incoming']}\nОн ответил: {pair['outgoing']}")
+    lines.append("Отвечай в такой же манере — но по смыслу нового сообщения.")
+    return "\n".join(lines)
+
+
 def build_messages(cfg, *, chat_id: int, chat_title: str | None = None,
                    contact_name: str | None = None, extra: str = "") -> list[dict]:
     """Готовит список сообщений для DeepSeek: системный промпт + история переписки."""
     limit = int(cfg.get("history_limit") or 20)
     rows = db.recent(chat_id, limit)
+    examples = style_examples(chat_id) if chat_id else ""
 
     messages: list[dict] = [{
         "role": "system",
         "content": build_system(cfg, chat_id=chat_id, chat_title=chat_title,
-                                contact_name=contact_name, extra=extra),
+                                contact_name=contact_name, extra=extra, examples=examples),
     }]
 
     for row in rows:

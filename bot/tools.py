@@ -21,9 +21,10 @@ import logging
 import math
 import operator
 import re
+import time
 from dataclasses import dataclass, field
 
-from bot import db
+from bot import config, db
 from bot.search import open_page, web_search
 
 log = logging.getLogger("tools")
@@ -38,9 +39,28 @@ class ToolContext:
     contact_name: str | None = None
     owner_chat_id: str | None = None
     enabled: set[str] = field(default_factory=set)
+    admin: bool = False          # True = это личный чат владельца, можно менять настройки
 
     def allowed(self, name: str) -> bool:
         return not self.enabled or name in self.enabled
+
+
+# Инструменты, меняющие настройки самого бота, — только для владельца
+ADMIN_ONLY = {
+    "set_mode", "set_style", "set_quiet_hours", "chat_action",
+    "remember", "forget", "learn_style", "show_settings",
+}
+
+
+def _list_change(key: str, chat_id: int, add: bool) -> list[str]:
+    values = [str(x) for x in (config.cfg.get(key) or [])]
+    item = str(chat_id)
+    if add and item not in values:
+        values.append(item)
+    if not add and item in values:
+        values.remove(item)
+    config.cfg.set(key, values)
+    return values
 
 
 # ------------------------------------------------------------------ описание
@@ -240,6 +260,130 @@ SCHEMA: dict[str, dict] = {
             },
         },
     },
+    "set_mode": {
+        "type": "function",
+        "function": {
+            "name": "set_mode",
+            "description": "Переключить режим ответов: auto — отвечаю сам, suggest — присылаю черновик, "
+                           "off — только читаю. Без chat_id меняется общий режим; с chat_id — для одного чата.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mode": {"type": "string", "enum": ["auto", "suggest", "off"]},
+                    "chat_id": {"type": "integer", "description": "id чата (необязательно)"},
+                },
+                "required": ["mode"],
+            },
+        },
+    },
+    "set_style": {
+        "type": "function",
+        "function": {
+            "name": "set_style",
+            "description": "Изменить, как бот пишет от лица владельца: задать характер (persona) "
+                           "или добавить постоянное правило (add_rule).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "persona": {"type": "string", "description": "Новый стиль (например «пиши коротко и без эмодзи»)"},
+                    "add_rule": {"type": "string", "description": "Постоянное правило к инструкциям"},
+                },
+            },
+        },
+    },
+    "set_quiet_hours": {
+        "type": "function",
+        "function": {
+            "name": "set_quiet_hours",
+            "description": "Тихие часы: в это время бот не отвечает сам, а только присылает черновики. "
+                           "Формат 23:00-08:00, либо off — выключить.",
+            "parameters": {
+                "type": "object",
+                "properties": {"spec": {"type": "string", "description": "23:00-08:00 или off"}},
+                "required": ["spec"],
+            },
+        },
+    },
+    "chat_action": {
+        "type": "function",
+        "function": {
+            "name": "chat_action",
+            "description": "Управление конкретным чатом: pause (пауза), resume (снять паузу), "
+                           "block (игнорировать), unblock, only (отвечать только в нём), "
+                           "reset_only (снять ограничение), note (заметка о чате).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "chat_id": {"type": "integer"},
+                    "action": {"type": "string",
+                               "enum": ["pause", "resume", "block", "unblock", "only",
+                                        "reset_only", "note"]},
+                    "minutes": {"type": "integer", "description": "для pause"},
+                    "text": {"type": "string", "description": "для note"},
+                },
+                "required": ["chat_id", "action"],
+            },
+        },
+    },
+    "remember": {
+        "type": "function",
+        "function": {
+            "name": "remember",
+            "description": "Запомнить навсегда важное: предпочтения владельца, правила, факты о людях. "
+                           "Вызывай, когда владелец говорит «запомни».",
+            "parameters": {
+                "type": "object",
+                "properties": {"text": {"type": "string", "description": "Что запомнить"}},
+                "required": ["text"],
+            },
+        },
+    },
+    "list_memory": {
+        "type": "function",
+        "function": {
+            "name": "list_memory",
+            "description": "Показать всё, что бот помнит о владельце и его предпочтениях.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    "forget": {
+        "type": "function",
+        "function": {
+            "name": "forget",
+            "description": "Удалить запись из памяти по id (или всю память при all=true).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "all": {"type": "boolean"},
+                },
+            },
+        },
+    },
+    "learn_style": {
+        "type": "function",
+        "function": {
+            "name": "learn_style",
+            "description": "Выучиться писать как владелец: бот разбирает его собственные сообщения "
+                           "и их ответы и обновляет профиль стиля.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "chat_id": {"type": "integer", "description": "учить по одному чату (необязательно)"},
+                    "count": {"type": "integer", "description": "Сколько его сообщений разобрать (10-200)"},
+                },
+            },
+        },
+    },
+    "show_settings": {
+        "type": "function",
+        "function": {
+            "name": "show_settings",
+            "description": "Показать текущие настройки бота: режим, стиль, правила, тихие часы, "
+                           "списки чатов, подключения, память.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 }
 
 
@@ -321,7 +465,10 @@ async def _fire_reminder(ctx: ToolContext, text: str, minutes: int) -> None:
         return
     from bot.business import send_as_owner  # импорт здесь, чтобы не было цикла
     try:
-        await send_as_owner(ctx.bot, ctx.chat_id, ctx.conn_id, f"⏰ Напоминание: {text}")
+        reminder = f"⏰ Напоминание: {text}"
+        if await send_as_owner(ctx.bot, ctx.chat_id, ctx.conn_id, reminder):
+            db.log_message(ctx.chat_id, reminder, is_out=True, kind="text",
+                           conn_id=ctx.conn_id, by_bot=True)
     except Exception as e:  # noqa: BLE001 — напоминание не должно ронять бота
         log.warning("напоминание не отправилось: %s", e)
 
@@ -332,11 +479,49 @@ def _schedule_reminder(ctx: ToolContext, text: str, minutes: int) -> None:
     task.add_done_callback(_reminder_tasks.discard)
 
 
+# ------------------------------------------------------------------ обучение
+STYLE_SYSTEM = (
+    "Ты аналитик стиля речи. По сообщениям человека составь краткий профиль, КАК он пишет: "
+    "длина фраз, обращения, тон, любимые слова и междометия, эмодзи, пунктуация, чего он избегает. "
+    "Пиши по-русски, до 8 коротких пунктов, только наблюдаемые факты, без воды и без оценок."
+)
+
+
+async def train_style(cfg, chat_id: int | None = None, count: int = 80) -> str:
+    """Учимся писать как владелец: разбираем его сообщения и пары «вопрос → ответ»."""
+    from bot.ai import AIError, DeepSeek
+
+    texts = db.owner_replies(count, chat_id)
+    if len(texts) < 5:
+        return (f"Пока нечего изучать: вижу только {len(texts)} твоих сообщений. "
+                "Отвечай в чатах сам (или поправляй мои черновики) — наберём материал, и я стану писать похоже.")
+
+    sample = "\n".join(f"— {t}" for t in texts)
+    pairs = db.style_pairs(chat_id, 12)
+    if pairs:
+        sample += "\n\nПары «сообщение собеседника → ответ владельца»:\n" + "\n".join(
+            f"Собеседник: {p['incoming']}\nВладелец: {p['outgoing']}"
+            for p in pairs if p.get("incoming")
+        )
+
+    try:
+        profile = await DeepSeek(cfg).ask(STYLE_SYSTEM, sample)
+    except AIError as e:
+        return f"Не смог обучиться: {e}"
+
+    db.set_setting("style_profile", profile)
+    db.set_setting("style_profile_updated", db.now_str())
+    db.set_setting("style_pairs_seen", db.pair_count())
+    return f"Профиль стиля обновлён по {len(texts)} твоим сообщениям:\n\n{profile}"
+
+
 # ---------------------------------------------------------------- исполнитель
 async def run_tool(name: str, args: dict, ctx: ToolContext) -> str:
     """Выполняет инструмент и возвращает текст-результат для модели."""
     if not ctx.allowed(name):
         return "Инструмент отключён."
+    if name in ADMIN_ONLY and not ctx.admin:
+        return "Это действие доступно только владельцу в личном чате с ботом."
 
     try:
         if name == "web_search":
@@ -446,6 +631,117 @@ async def run_tool(name: str, args: dict, ctx: ToolContext) -> str:
                 f"[{r['created']}] {'Я' if r.get('is_out') else (r.get('user_name') or 'собеседник')}: "
                 f"{r.get('text') or '[' + (r.get('kind') or 'вложение') + ']'}"
                 for r in rows
+            )
+
+        if name == "set_mode":
+            mode = str(args.get("mode") or "").lower()
+            if mode not in ("auto", "suggest", "off"):
+                return "Режим может быть только auto, suggest или off."
+            raw_chat = args.get("chat_id")
+            if raw_chat:
+                chat_id = int(raw_chat)
+                db.ensure_chat(chat_id)
+                db.set_chat(chat_id, mode=mode)
+                return f"Для чата {chat_id} включён режим {mode}."
+            config.cfg.set("mode", mode)
+            return f"Общий режим теперь {mode}."
+
+        if name == "set_style":
+            persona = str(args.get("persona") or "").strip()
+            rule = str(args.get("add_rule") or "").strip()
+            done = []
+            if persona:
+                config.cfg.set("persona", persona)
+                done.append("стиль обновлён")
+            if rule:
+                old = str(config.cfg.get("extra_instructions") or "").strip()
+                config.cfg.set("extra_instructions", f"{old}\n{rule}".strip() if old else rule)
+                done.append("правило добавлено")
+            return "Готово: " + ", ".join(done) if done else "Не понял, что менять."
+
+        if name == "set_quiet_hours":
+            spec = str(args.get("spec") or "").strip()
+            if not spec or spec.lower() in ("off", "выкл", "нет"):
+                config.cfg.set("quiet_hours", None)
+                return "Тихие часы выключены."
+            if "-" not in spec or ":" not in spec:
+                return "Нужен формат вида 23:00-08:00."
+            config.cfg.set("quiet_hours", spec)
+            return f"Тихие часы: {spec}. В это время отвечаю только черновиками."
+
+        if name == "chat_action":
+            chat_id = int(args.get("chat_id") or 0)
+            action = str(args.get("action") or "").lower()
+            if not chat_id:
+                return "Нужен chat_id — его даёт list_chats."
+            db.ensure_chat(chat_id)
+            if action == "pause":
+                minutes = max(1, min(int(args.get("minutes") or 60), 10080))
+                db.set_chat(chat_id, paused_until=time.time() + minutes * 60)
+                return f"Чат {chat_id} на паузе {minutes} мин."
+            if action == "resume":
+                db.set_chat(chat_id, paused_until=0)
+                return f"Пауза снята: чат {chat_id}."
+            if action == "block":
+                return f"Игнорирую чаты: {', '.join(_list_change('blocked_chats', chat_id, True))}"
+            if action == "unblock":
+                values = _list_change("blocked_chats", chat_id, False)
+                return f"Чат {chat_id} убран из игнора. Игнор: {', '.join(values) or '—'}"
+            if action == "only":
+                return ("Теперь отвечаю только в белом списке: "
+                        + ", ".join(_list_change("allowed_chats", chat_id, True)))
+            if action == "reset_only":
+                config.cfg.set("allowed_chats", [])
+                return "Отвечаю во всех чатах."
+            if action == "note":
+                note = str(args.get("text") or "").strip()
+                db.set_chat(chat_id, note=note or None)
+                return f"Заметка о чате {chat_id}: {note or '—'}"
+            return "Действие может быть: pause, resume, block, unblock, only, reset_only, note."
+
+        if name == "remember":
+            text = str(args.get("text") or "").strip()
+            if not text:
+                return "Нечего запоминать."
+            db.remember(text)
+            return f"Запомнил навсегда: {text}"
+
+        if name == "list_memory":
+            items = db.memory_items()
+            if not items:
+                return "Память пуста."
+            return "\n".join(f"№{i['id']}: {i['text']}" for i in items)
+
+        if name == "forget":
+            if args.get("all"):
+                return f"Память очищена: {db.forget_memory()} записей."
+            try:
+                memory_id = int(args.get("id") or 0)
+            except (TypeError, ValueError):
+                memory_id = 0
+            if not memory_id:
+                return "Нужен id записи или all=true."
+            return "Забыл." if db.forget_memory(memory_id) else "Такой записи нет."
+
+        if name == "learn_style":
+            chat_id = int(args.get("chat_id") or 0) or None
+            count = max(10, min(int(args.get("count") or 80), 200))
+            return await train_style(config.cfg, chat_id=chat_id, count=count)
+
+        if name == "show_settings":
+            cfg = config.cfg
+            return (
+                f"Режим: {cfg.get('mode')}\n"
+                f"Модель: {cfg.get('deepseek_model')}\n"
+                f"Тихие часы: {cfg.get('quiet_hours') or 'выключены'}\n"
+                f"Стиль: {cfg.get('persona') or '—'}\n"
+                f"Доп. правила: {cfg.get('extra_instructions') or '—'}\n"
+                f"Игнорирую: {', '.join(map(str, cfg.get('blocked_chats') or [])) or '—'}\n"
+                f"Отвечаю только в: {', '.join(map(str, cfg.get('allowed_chats') or [])) or 'во всех чатах'}\n"
+                f"Подключений к аккаунту: {len([c for c in db.connections() if c.get('is_enabled')])}\n"
+                f"Переписок в базе: {db.stats()['chats']}\n"
+                f"Пар «вопрос-ответ» для обучения: {db.pair_count()}\n"
+                f"Профиль стиля: {'есть' if db.get_setting('style_profile') else 'нет'}"
             )
 
     except Exception as e:  # noqa: BLE001 — инструмент не должен ронять ответ

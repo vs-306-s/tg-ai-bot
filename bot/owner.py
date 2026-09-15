@@ -18,7 +18,8 @@ from aiogram.types import (BufferedInputFile, CallbackQuery, InlineKeyboardButto
 
 from bot import config, db, persona
 from bot.ai import AIError
-from bot.business import (chat_mode, make_reply, run_agent, send_as_owner)
+from bot.business import (chat_mode, make_reply, maybe_schedule_training, run_agent,
+                          send_as_owner)
 from bot.tools import ToolContext
 
 log = logging.getLogger("owner")
@@ -28,66 +29,57 @@ CHUNK = 3500
 MODES = ("auto", "suggest", "off")
 MODE_LABEL = {"auto": "🤖 авто-ответы", "suggest": "💡 черновики мне", "off": "🔇 только читать"}
 
-# Какие инструменты доступны помощнику в личном чате с владельцем
-OWNER_TOOLS = {"list_chats", "search_messages", "chat_digest", "calc", "add_note", "list_notes"}
+# Какие инструменты доступны помощнику в личном чате с владельцем.
+# Второй набор — самоуправление: бот сам меняет свои настройки по просьбе словами.
+OWNER_TOOLS = {
+    "list_chats", "search_messages", "chat_digest", "calc", "add_note", "list_notes",
+    "set_mode", "set_style", "set_quiet_hours", "chat_action",
+    "remember", "list_memory", "forget", "learn_style", "show_settings",
+}
 OWNER_WEB_TOOLS = {"web_search", "open_page"}
 
 OWNER_SYSTEM = (
-    "Ты личный помощник владельца Telegram-аккаунта. Отвечай по-русски, по делу, коротко (до 10 строк).\n"
-    "Ты УМЕЕШЬ смотреть его переписку — инструментами: list_chats (список чатов), "
-    "search_messages (поиск по всем сообщениям), chat_digest (последние сообщения чата). "
-    "Когда спрашивают про чаты, людей или переписку — сначала вызови инструмент и посмотри данные, "
-    "и только потом отвечай. Никогда не говори «у меня нет доступа», не проверив инструментом.\n"
-    "Учитывай ограничение Telegram: бот видит только сообщения, пришедшие ПОСЛЕ подключения "
-    "к Telegram Business (Настройки → Telegram Business → Чат-боты); историю до подключения "
-    "Telegram не отдаёт. Если данных нет — объясни именно это.\n"
-    "Свежие факты из интернета — web_search, точная арифметика — calc, важные дела — add_note. "
-    "Никогда не выдумывай факты, цифры и цитаты из переписки."
+    "Ты личный помощник владельца Telegram-аккаунта и управляешь ботом за него. "
+    "Отвечай по-русски, по делу, коротко (до 10 строк), без лишних подробностей.\n"
+    "ТЫ УМЕЕШЬ (вызывай инструменты, а не объясняй, как это сделать вручную):\n"
+    "— смотреть переписку: list_chats, search_messages, chat_digest;\n"
+    "— менять настройки: set_mode (auto/suggest/off), set_style (манера письма), set_quiet_hours, "
+    "chat_action (pause/resume/block/unblock/only/note);\n"
+    "— память: remember, list_memory, forget;\n"
+    "— учиться писать как владелец: learn_style;\n"
+    "— показывать состояние: show_settings;\n"
+    "— интернет и калькулятор: web_search, open_page, calc.\n"
+    "Когда владелец говорит «сделай…», «включи…», «запомни…», «не отвечай…» — ВЫПОЛНИ это инструментом "
+    "и коротко отчитайся одной строкой, что именно сделал.\n"
+    "Никогда не говори «у меня нет доступа», не проверив данные инструментом. "
+    "Помни ограничение Telegram: бот видит только сообщения, пришедшие ПОСЛЕ подключения к Telegram Business; "
+    "историю до подключения Telegram не отдаёт — если данных нет, объясни именно это.\n"
+    "Не выдумывай факты, цифры и цитаты из переписки."
 )
 
-HELP = """🤖 <b>Твой личный ИИ-помощник в Telegram</b>
+HELP = """🤖 <b>Я твой личный помощник в Telegram</b>
+Читаю твою переписку (подключён через Telegram Business) и отвечаю от твоего лица.
 
-Я читаю твою переписку (подключён через Telegram Business) и могу отвечать от твоего лица.
+<b>Просто пиши словами — я сам всё настрою:</b>
+• «включи авто-ответы» / «пусть только черновики»
+• «пиши короче и без эмодзи» / «отвечай теплее с мамой»
+• «не отвечай вот этому чату 30 минут»
+• «ночью с 23 до 8 не отвечай сам»
+• «запомни: по работе я всегда перезваниваю»
+• «выучи мой стиль» — стану писать как ты
+• «покажи мои чаты» / «найди, где обсуждали встречу»
+• «перескажи чат с Олегом» / «что у тебя настроено»
 
-<b>Режимы</b>
-/mode auto — отвечаю сам
-/mode suggest — присылаю черновик с кнопками
-/mode off — только читаю и записываю
-/mode suggest 123456789 — режим для конкретного чата
+<b>Кнопки и главное</b>
+/panel — панель: режим, обучение, память, чаты
+/mode auto|suggest|off — режим ответов
+/chats — переписки · /status — состояние
+/reply &lt;id&gt; текст — написать самому от твоего лица
+/train — выучить мой стиль · /memory — что ты помнишь
 
-<b>Чаты</b>
-/chats — список переписок
-/chat 123456789 — карточка чата
-/pause 123456789 30 — пауза 30 минут
-/resume 123456789 — снять паузу
-/block 123456789 — игнорировать чат
-/allow 123456789 — только эти чаты (пустой список = все)
-/reply 123456789 текст — написать от твоего лица
-
-<b>Поиск и вопросы</b>
-/find слово — поиск по всей переписке
-/ask вопрос — спросить ИИ (с поиском в интернете)
-/search запрос — просто поиск в интернете
-/sum 123456789 40 — пересказ последних сообщений
-
-<b>Память о людях</b>
-/facts 123456789 — что я знаю о собеседнике
-/fact 123456789 текст — запомнить
-/forget 123456789 — очистить память о нём
-
-<b>Заметки</b>
-/note текст · /notes · /done 3
-
-<b>Характер и настройки</b>
-/style текст — как писать от твоего имени
-/extra текст — дополнительные правила
-/quiet 23:00-08:00 — тихие часы (или /quiet off)
-/key sk-... — ключ DeepSeek
-/model deepseek-chat | deepseek-reasoner
-/status · /stats · /panel · /reload
-
-<b>Прочее</b>
-/dump 123456789 — выгрузить переписку файлом
+<b>Тонкая настройка (по желанию)</b>
+/find /ask /search /sum /facts /fact /notes /note /style /extra /quiet
+/pause /block /allow /dump /stats /key /model /reload /chat
 """
 
 
@@ -152,12 +144,13 @@ def panel_keyboard() -> InlineKeyboardMarkup:
         return ("✅ " if mode == value else "") + label
 
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=mark("auto", "🤖 Авто-ответы"), callback_data="own:mode:auto"),
+        [InlineKeyboardButton(text=mark("auto", "🤖 Сам отвечаю"), callback_data="own:mode:auto"),
          InlineKeyboardButton(text=mark("suggest", "💡 Черновики"), callback_data="own:mode:suggest"),
          InlineKeyboardButton(text=mark("off", "🔇 Выкл"), callback_data="own:mode:off")],
+        [InlineKeyboardButton(text="🎓 Выучить мой стиль", callback_data="own:learn")],
+        [InlineKeyboardButton(text="💬 Чаты", callback_data="own:chats"),
+         InlineKeyboardButton(text="🧠 Память", callback_data="own:memory")],
         [InlineKeyboardButton(text="📊 Статус", callback_data="own:status"),
-         InlineKeyboardButton(text="💬 Чаты", callback_data="own:chats")],
-        [InlineKeyboardButton(text="📝 Заметки", callback_data="own:notes"),
          InlineKeyboardButton(text="❓ Помощь", callback_data="own:help")],
     ])
 
@@ -165,12 +158,15 @@ def panel_keyboard() -> InlineKeyboardMarkup:
 @router.message(Command("panel"), OwnerOnly())
 async def cmd_panel(message: Message) -> None:
     cfg = config.cfg
+    learned = "выучен ✅" if db.get_setting("style_profile") else "ещё не учился"
     await message.answer(
-        "⚙️ <b>Панель управления</b>\n\n"
+        "⚙️ <b>Панель</b>\n\n"
         f"Режим: {MODE_LABEL.get(str(cfg.get('mode')), cfg.get('mode'))}\n"
-        f"ИИ: {'подключён ✅' if cfg.has_ai else 'нет ключа ❌'}\n"
-        f"Тихие часы: {cfg.get('quiet_hours') or 'выключены'}\n"
-        f"Подключений к аккаунту: {len([c for c in db.connections() if c.get('is_enabled')])}",
+        f"ИИ: {'работает ✅' if cfg.has_ai else 'нет ключа ❌'}\n"
+        f"Мой стиль: {learned}\n"
+        f"Память: {len(db.memory_items())} записей\n"
+        f"Подключено аккаунтов: {len([c for c in db.connections() if c.get('is_enabled')])}\n\n"
+        "Любую настройку можно поменять просто словами: «включи авто-ответы», «пиши короче», «запомни…»",
         panel_keyboard(),
     )
 
@@ -188,6 +184,28 @@ async def on_panel_button(query: CallbackQuery, bot: Bot) -> None:
         config.cfg.set("mode", parts[2])
         await query.answer(f"Режим: {parts[2]}")
         await query.message.edit_text(f"⚙️ Режим переключён: {MODE_LABEL[parts[2]]}", reply_markup=panel_keyboard())
+        return
+
+    if action == "learn":
+        if not config.cfg.has_ai:
+            await query.answer("Нужен ключ DeepSeek", show_alert=True)
+            return
+        await query.answer("Учусь…")
+        from bot.tools import train_style
+
+        result = await train_style(config.cfg)
+        await say(query.message, result)
+        return
+
+    if action == "memory":
+        await query.answer()
+        items = db.memory_items()
+        if not items:
+            await query.message.answer("🧠 Память пуста. Скажи «запомни: …» — я сохраню.")
+            return
+        await say(query.message, "🧠 <b>Помню:</b>\n"
+                  + "\n".join(f"№{i['id']}: {i['text']}" for i in items)
+                  + "\n\nУбрать запись — /memory clear (стереть всё) или скажи «забудь №3»")
         return
 
     if action == "status":
@@ -433,9 +451,10 @@ async def cmd_reply(message: Message, command: CommandObject, bot: Bot) -> None:
     if not conn_id:
         await message.answer("Не знаю, через какую связку писать в этот чат. Пусть собеседник напишет первым.")
         return
-    if await send_as_owner(bot, chat_id, conn_id, args[1]):
+    if await send_as_owner(bot, chat_id, conn_id, args[1], by_bot=False):
         db.close_drafts(chat_id, "manual")
-        db.log_message(chat_id, args[1], is_out=True, kind="text", conn_id=conn_id)
+        db.log_message(chat_id, args[1], is_out=True, kind="text", conn_id=conn_id, by_bot=False)
+        maybe_schedule_training(bot)
         await message.answer(f"✅ Отправил в <code>{chat_id}</code>: {args[1]}")
     else:
         await message.answer("❌ Не получилось отправить.")
@@ -483,7 +502,7 @@ async def ask_agent(message: Message, bot: Bot, question: str) -> None:
     tools = set(OWNER_TOOLS)
     if config.cfg.get("web_search"):
         tools |= OWNER_WEB_TOOLS
-    ctx = ToolContext(chat_id=0, bot=bot, owner_chat_id=config.cfg.owner_chat_id)
+    ctx = ToolContext(chat_id=0, bot=bot, owner_chat_id=config.cfg.owner_chat_id, admin=True)
     try:
         answer = await run_agent(config.cfg, messages, ctx, tools=tools)
     except AIError as e:
@@ -603,6 +622,39 @@ async def cmd_done(message: Message, command: CommandObject) -> None:
         await message.answer("Использование: /done 3")
         return
     await message.answer("✅ Готово." if db.close_note(note_id) else "Такой заметки нет.")
+
+
+# ------------------------------------------------- обучение и общая память
+@router.message(Command("train"), OwnerOnly())
+async def cmd_train(message: Message) -> None:
+    """Выучить, как пишет владелец, и запомнить это в профиль стиля."""
+    if not config.cfg.has_ai:
+        await message.answer("Сначала впиши ключ DeepSeek: /key sk-...")
+        return
+    from bot.tools import train_style
+
+    status = await message.answer("🎓 Разбираю твои сообщения и ответы…")
+    result = await train_style(config.cfg)
+    try:
+        await status.delete()
+    except Exception:  # noqa: BLE001
+        pass
+    await say(message, result)
+
+
+@router.message(Command("memory"), OwnerOnly())
+async def cmd_memory(message: Message, command: CommandObject) -> None:
+    """Что бот помнит о владельце; /memory clear — стереть."""
+    arg = (command.args or "").strip().lower()
+    if arg in ("clear", "clear_all", "очистить", "стереть"):
+        await message.answer(f"🧽 Память очищена: {db.forget_memory()} записей.")
+        return
+    items = db.memory_items()
+    if not items:
+        await message.answer("🧠 Память пуста. Скажи «запомни: …» — я сохраню навсегда.")
+        return
+    await say(message, "🧠 <b>Помню:</b>\n"
+              + "\n".join(f"№{i['id']}: {i['text']}" for i in items))
 
 
 # ------------------------------------------------------------- характер, ключи

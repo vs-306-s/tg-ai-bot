@@ -130,8 +130,13 @@ async def typing(bot: Bot, chat_id: int, conn_id: str | None, seconds: float = 0
 
 
 async def send_as_owner(bot: Bot, chat_id: int, conn_id: str | None, text: str,
-                        reply_to: int | None = None) -> bool:
-    """Отправляет сообщение в бизнес-чат от имени владельца."""
+                        reply_to: int | None = None, by_bot: bool = True) -> bool:
+    """Отправляет сообщение в бизнес-чат от имени владельца.
+
+    by_bot=True — текст написал бот (ответ, черновик, напоминание): такое сообщение
+    помечается, чтобы бот не учился на своих же фразах.
+    by_bot=False — текст написан владельцем (команда /reply).
+    """
     if not conn_id:
         log.warning("нет business_connection_id для чата %s — отправить нельзя", chat_id)
         return False
@@ -148,10 +153,67 @@ async def send_as_owner(bot: Bot, chat_id: int, conn_id: str | None, text: str,
                 reply_to_message_id=reply_to if index == 0 else None,
             )
             sent_any = True
+            if by_bot:
+                _note_bot_send(chat_id, part)
         except Exception as e:  # noqa: BLE001
             log.warning("не смог отправить в чат %s: %s", chat_id, e)
             break
     return sent_any
+
+
+# ------------------------------------------------- обучение манере владельца
+# Наши собственные отправки: чтобы отличить «написал бот» от «написал владелец»
+_recent_sends: dict[int, tuple[str, float]] = {}
+
+STYLE_TRAIN_EVERY = 25          # столько новых пар — и сами обновляем профиль стиля
+_style_task: asyncio.Task | None = None
+
+
+def _note_bot_send(chat_id: int, text: str) -> None:
+    _recent_sends[chat_id] = (text.strip(), time.time())
+
+
+def _was_sent_by_bot(chat_id: int, text: str | None) -> bool:
+    if not text:
+        return False
+    stored = _recent_sends.get(chat_id)
+    if not stored:
+        return False
+    sent, when = stored
+    return sent == text.strip() and (time.time() - when) < 120
+
+
+def remember_style_pair(chat_id: int, reply: str | None) -> None:
+    """Запоминаем «что написали → как владелец ответил сам» — материал для обучения."""
+    if not reply or not reply.strip():
+        return
+    db.add_style_pair(chat_id, db.last_incoming(chat_id), reply.strip())
+
+
+def maybe_schedule_training(bot: Bot) -> None:
+    """Каждые N новых пар сами обновляем профиль стиля («тренировка» в фоне)."""
+    global _style_task
+    if not config.cfg.has_ai:
+        return
+    try:
+        seen = int(db.get_setting("style_pairs_seen", 0) or 0)
+    except (TypeError, ValueError):
+        seen = 0
+    if db.pair_count() - seen < STYLE_TRAIN_EVERY:
+        return
+    if _style_task and not _style_task.done():
+        return
+    _style_task = asyncio.create_task(_train_in_background(bot))
+
+
+async def _train_in_background(bot: Bot) -> None:
+    try:
+        from bot.tools import train_style
+
+        result = await train_style(config.cfg, count=80)
+        await notify_owner(bot, f"🎓 Обучился на твоих ответах.\n\n{result}")
+    except Exception:  # noqa: BLE001
+        log.exception("фоновая тренировка стиля не удалась")
 
 
 async def notify_owner(bot: Bot, text: str, keyboard: InlineKeyboardMarkup | None = None) -> None:
@@ -303,6 +365,10 @@ async def on_business_message(message: Message, bot: Bot) -> None:
     chat_existed = bool(db.get_chat(chat.id))
 
     db.ensure_chat(chat.id, title, chat.username, conn_id)
+    by_bot = is_out and _was_sent_by_bot(chat.id, text)
+    if by_bot:
+        return                      # это наше же сообщение — оно уже записано при отправке
+
     db.log_message(
         chat.id, text, chat_title=title,
         user_id=getattr(message.from_user, "id", None),
@@ -311,8 +377,10 @@ async def on_business_message(message: Message, bot: Bot) -> None:
         is_out=is_out, kind=kind, tg_id=message.message_id, conn_id=conn_id,
     )
 
-    # Владелец сам написал в чат — значит, черновик не нужен.
+    # Владелец сам написал в чат: закрываем черновик и запоминаем его манеру.
     if is_out:
+        remember_style_pair(chat.id, text)
+        maybe_schedule_training(bot)
         if db.close_drafts(chat.id, "manual"):
             await notify_owner(bot, f"✍️ Ты сам ответил в «{title}» — черновик убрал.")
         return
@@ -413,7 +481,7 @@ async def compose_and_answer(bot: Bot, chat_id: int, conn_id: str, chat_title: s
         if await send_as_owner(bot, chat_id, conn_id, reply):
             note_reply(chat_id)
             db.log_message(chat_id, reply, chat_title=chat_title, is_out=True,
-                           kind="text", conn_id=conn_id)
+                           kind="text", conn_id=conn_id, by_bot=True)
         return
 
     await send_draft(bot, chat_id, conn_id, chat_title, reply, reason)
@@ -474,7 +542,8 @@ async def on_draft_button(query: CallbackQuery, bot: Bot) -> None:
         ok = await send_as_owner(bot, chat_id, conn_id, draft["draft"])
         if ok:
             db.update_draft(draft_id, status="sent")
-            db.log_message(chat_id, draft["draft"], is_out=True, kind="text", conn_id=conn_id)
+            db.log_message(chat_id, draft["draft"], is_out=True, kind="text",
+                           conn_id=conn_id, by_bot=True)
             note_reply(chat_id)
             await _edit_owner_message(query, f"✅ Отправил:\n\n{draft['draft']}")
         else:
